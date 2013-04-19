@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 *.iws
 *Db.properties
 *Db.script
@@ -16,3 +17,7 @@ stacktrace.log
 .classpath
 .idea
 .project
+*.war
+*.zip
+*.iml
+*.ipr
