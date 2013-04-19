@@ -20,3 +20,4 @@
 - build for different architectures.
 - MacOSX, FreeBSD, and Solaris builds.
 - source RPM packaged with grails wrapper.
+- Remove dependency on standalone plugin's targets?  Seems very fragile.

@@ -31,14 +31,14 @@ target(rpmBuild: "package a grails application as an RPM") {
     def pluginConfig = config.grails.plugins.rpmBuild
 
     def fullName = "${grailsAppName}-${grailsAppVersion}"
-    def jarName  = "rpm-build/${fullName}.jar"
-    def targetPath = grailsSettings.projectTargetDir
+    def jarName  = "${fullName}.jar"
+    def targetPath = "${grailsSettings.projectTargetDir}/rpm-build"
     def rpmDir  = ""
     def javaVersion = config.grails.project.source.level
 
     //clean the rpm-build directory
-    ant.delete( dir: "${targetPath}/rpm-build" )
-    ant.mkdir( dir: "${targetPath}/rpm-build" )
+    ant.delete( dir: targetPath )
+    ant.mkdir( dir: targetPath )
 
     def release  = "01" //TODO release # can be tied to jenkins build #
     //TODO configurable
@@ -55,8 +55,7 @@ target(rpmBuild: "package a grails application as an RPM") {
     //Build the Jar using the standalone plugin
     event 'StatusUpdate', ["Building jar with Standalone plugin"]
 
-    def workDir = new File( "${targetPath}/rpm-build" )
-    ant.mkdir( dir: workDir.absolutePath )
+    def workDir = new File( targetPath )
     warfile = buildWar( workDir )
     def jarfile = new File( "${targetPath}/${jarName}" )
     if( !buildJar( workDir, jarfile, true, warfile ) ) {
@@ -70,7 +69,6 @@ target(rpmBuild: "package a grails application as an RPM") {
     rpmBuilder.type = RpmType.BINARY
     rpmBuilder.setPlatform( Architecture.NOARCH, Os.LINUX )
 
-    rpmBuilder.addDependencyMore "java", javaVersion.toString()
     rpmBuilder.addDependencyMore "java", javaVersion.toString()
     //TODO allow adding other dependencies like redis
 
@@ -86,18 +84,18 @@ target(rpmBuild: "package a grails application as an RPM") {
     rpmBuilder.addFile "${programPrefix}/lib/${jarName}", jarfile
 
     //Create a script to run the jar file
-    def runScript = new File( targetPath, "rpm-build/${grailsAppName}" )
-    runScript.withWriter{ it << createRunScript( pluginConfig, programPrefix, jarName, logPrefix ) }
+    def runScript = new File( targetPath, grailsAppName )
+    runScript.withWriter{ it << createRunScript( pluginConfig, programPrefix, fullName, grailsAppName ) }
     rpmBuilder.addFile "${programPrefix}/bin/${grailsAppName}", runScript
 
     //Create an init script
-    def initScript = new File( targetPath, "rpm-build/${grailsAppName}-control" )
-    initScript.withWriter{ it << createInitScript( grailsAppName, programPrefix ) }
+    def initScript = new File( targetPath, "${grailsAppName}-control" )
+    initScript.withWriter{ it << createInitScript( grailsAppName, jarName, programPrefix ) }
     rpmBuilder.addFile "${programPrefix}/bin/${grailsAppName}-control", initScript
 
     //Create main config file
-    def mainConf = new File( targetPath, "rpm-build/${grailsAppName}.conf" )
-    mainConf.withWriter{ it << createDefaultConfig( grailsAppName ) }
+    def mainConf = new File( targetPath, "${grailsAppName}.conf" )
+    mainConf.withWriter{ it << createDefaultConfig( grailsAppName, pluginConfig ) }
     rpmBuilder.addFile "/etc/sysconfig/${grailsAppName}", mainConf
 
     event 'StatusUpdate', ['Generating RPM']
@@ -113,171 +111,189 @@ target(rpmBuild: "package a grails application as an RPM") {
     return true
 }
 
-createRunScript = { ConfigObject config, String prefix, String jarName, String logPrefix ->
+createRunScript = { ConfigObject config, String prefix, String jarName, String appName ->
     """#!/bin/sh
 
-HTTP_HOSTNAME="${config.http.hostname ?: '0.0.0.0'}"
-HTTP_PORT="${config.http.port ?: 8080}"
-HTTP_CONTEXT="${config.http.context ?: '/'}"
-JAVA_OPTS="\$JAVA_OPTS -Xms${config.java.xms ?: '1024m'} -Xmx${config.java.xmx ?: '1024m'} -XX:MaxPermSize=${config.java.maxPermSize}"
+. /etc/sysconfig/${appName}
 JAR_PATH='$prefix/lib/$jarName'
 
 # Check for missing binaries (stale symlinks should not happen)
-test -r "\$JAR_PATH" || { echo "\$JAR_PATH not installed";
-        if [ "\$1" = "stop" ]; then exit 0;
-        else exit 5; fi; }
+test -r "\$JAR_PATH" || { echo "\$JAR_PATH not installed"; exit 5; fi; }
 
-
-CMD="java \$JAVA_OPTS -jar \$JAR_PATH \$HTTP_CONTEXT \$HTTP_HOSTNAME \$HTTP_PORT"
-
-\$CMD
+java \$JAVA_OPTS -jar \$JAR_PATH \$HTTP_CONTEXT \$HTTP_HOSTNAME \$HTTP_PORT
 """.trim()
 }
 
 
-createDefaultConfig = { String appName ->
+createDefaultConfig = { String appName, ConfigObject config ->
     """
-HTTP_HOSTNAME=0.0.0.0
-HTTP_PORT=8080
-HTTP_CONTEXT=""
-#JAVA_OPTS=""
+HTTP_HOSTNAME="${config.http.hostname ?: '0.0.0.0'}"
+HTTP_PORT=${config.http.port ?: '8080'}
+HTTP_CONTEXT="${config.http.context ?: '/'}"
+JAVA_OPTS="${config.java.opts ?: ''}"
 #JAVA_HOME=""
 """
 }
 
-createInitScript = { String appName, String prefix ->
+createInitScript = { String appName, String jarName, String prefix ->
     """
-#!/bin/sh
+#!/bin/bash
 #
-# ${appName}      Start/Stop ${appName}.
+# chkconfig: 345 90 10
+# description: Java deamon script
 #
-# chkconfig: 35 80 20
-# description: ${appName} standalone.
+# A non-SUSE Linux start/stop script for Java daemons.
 #
-# processname: ${appName}
-#
-# By:
-#
-#
-#
-### BEGIN INIT INFO
-# Provides:          ${appName}
-# Required-Start:    \$local_fs \$remote_fs \$network \$time \$named
-# Should-Start:      \$time sendmail
-# Required-Stop:     \$local_fs \$remote_fs \$network \$time \$named
-# Should-Stop:       \$time sendmail
-# Default-Start:     3 5
-# Default-Stop:      0 1 2 6
-# Short-Description: ${appName}
-# Description:       Starts ${appName}
-### END INIT INFO
+# Derived from - http://shrubbery.mynetgear.net/c/display/W/Java+Daemon+Startup+Script
 
-# Check for existence of needed config file and read it
-DEFAULT_CONFIG=/etc/sysconfig/${appName}
-LOCAL_CONFIG=/etc/${appName}/${appName}.conf
-test -e "\$DEFAULT_CONFIG" || { echo "\$DEFAULT_CONFIG not existing";
-        if [ "\$1" = "stop" ]; then exit 0;
-        else exit 6; fi; }
-test -r "\$DEFAULT_CONFIG" || { echo "\$DEFAULT_CONFIG not readable. Perhaps you forgot 'sudo'?";
-        if [ "\$1" = "stop" ]; then exit 0;
-        else exit 6; fi; }
+# Load configuration options
+. /etc/sysconfig/${appName}
 
-# Override with local config, if existing
-test -e "\$LOCAL_CONFIG" && . \$LOCAL_CONFIG
+serviceNameLo="${appName}"                                  # service name with the first letter in lowercase
+serviceName="${appName}"                                    # service name
+serviceUser="${appName}"                                      # OS user name for the service
+serviceGroup="${appName}"                                    # OS group name for the service
+applDir="${prefix}"                          # home directory of the service application
+serviceUserHome="\$applDir"                       # home directory of the service user
+serviceLogFile="/var/log/\$serviceNameLo/\$serviceNameLo.log"               # log file for StdOut/StdErr
+maxShutdownTime=15                                         # maximum number of seconds to wait for the daemon to terminate normally
+pidFile="/var/run/\$serviceNameLo.pid"                      # name of PID file (PID = process ID number)
+javaCommand="java"                                         # name of the Java launcher without the path
+javaExe="java"                                        # file name of the Java application launcher executable
+javaArgs="\$JAVA_OPTS -jar ${prefix}/lib/${jarName} \$HTTP_CONTEXT \$HTTP_HOSTNAME \$HTTP_PORT"
+javaCommandLine="\$javaExe \$javaArgs"                       # command line to start the Java service application
+javaCommandLineKeyword="${jarName}"                     # a keyword that occurs on the commandline, used to detect an already running service process and to distinguish it from others
 
+# Makes the file \$1 writable by the group \$serviceGroup.
+function makeFileWritable {
+   local filename="\$1"
+   touch \$filename || return 1
+   chgrp \$serviceGroup \$filename || return 1
+   chmod g+w \$filename || return 1
+   return 0; }
 
+# Returns 0 if the process with PID \$1 is running.
+function checkProcessIsRunning {
+   local pid="\$1"
+   if [ -z "\$pid" -o "\$pid" == " " ]; then return 1; fi
+   if [ ! -e /proc/\$pid ]; then return 1; fi
+   return 0; }
 
+# Returns 0 if the process with PID \$1 is our Java service process.
+function checkProcessIsOurService {
+   local pid="\$1"
+   if [ "\$(ps -p \$pid --no-headers -o comm)" != "\$javaCommand" ]; then return 1; fi
+   grep -q --binary -F "\$javaCommandLineKeyword" /proc/\$pid/cmdline
+   if [ \$? -ne 0 ]; then return 1; fi
+   return 0; }
 
-PID_FILE=/var/run/${appName}.pid
-MY_USER=${appName}
-MY_CMD=${prefix}/bin/${appName}
-OUTPUT_LOG=/var/log/${appName}/output.log
+# Returns 0 when the service is running and sets the variable \$pid to the PID.
+function getServicePID {
+   if [ ! -f \$pidFile ]; then return 1; fi
+   pid="\$(<\$pidFile)"
+   checkProcessIsRunning \$pid || return 1
+   checkProcessIsOurService \$pid || return 1
+   return 0; }
 
-# Source function library
-. /etc/init.d/functions
+function startServiceProcess {
+   cd \$applDir || return 1
+   rm -f \$pidFile
+   makeFileWritable \$pidFile || return 1
+   makeFileWritable \$serviceLogFile || return 1
+   cmd="nohup \$javaCommandLine >>\$serviceLogFile 2>&1 &"
+   su -m \$serviceUser -s \$SHELL -c "\$cmd" || return 1
+   sleep 1s
+   ps hww -U \$serviceUser -o sess,ppid,pid,cmd | grep "\$javaCommandLineKeyword" | while read sess ppid pid cmd; do \
+        [[ "\$ppid" -eq "1" ]] || continue; \
+        echo "\$pid" > \$pidFile; \
+        done;
+   pid="\$(<\$pidFile)"
+   if checkProcessIsRunning \$pid; then :; else
+      echo -ne "\n\$serviceName start failed, see logfile."
+      return 1
+   fi
+   return 0; }
 
-# Get network config
-. /etc/sysconfig/network
+function stopServiceProcess {
+   kill \$pid || return 1
+   for ((i=0; i<maxShutdownTime*10; i++)); do
+      checkProcessIsRunning \$pid
+      if [ \$? -ne 0 ]; then
+         rm -f \$pidFile
+         return 0
+         fi
+      sleep 0.1
+      done
+   echo -e "\n\$serviceName did not terminate within \$maxShutdownTime seconds, sending SIGKILL..."
+   kill -s KILL \$pid || return 1
+   local killWaitTime=15
+   for ((i=0; i<killWaitTime*10; i++)); do
+      checkProcessIsRunning \$pid
+      if [ \$? -ne 0 ]; then
+         rm -f \$pidFile
+         return 0
+         fi
+      sleep 0.1
+      done
+   echo "Error: \$serviceName could not be stopped within \$maxShutdownTime+\$killWaitTime seconds!"
+   return 1; }
 
-RETVAL=0
+function startService {
+   getServicePID
+   if [ \$? -eq 0 ]; then echo -n "\$serviceName is already running"; RETVAL=0; return 0; fi
+   echo -n "Starting \$serviceName   "
+   startServiceProcess
+   if [ \$? -ne 0 ]; then RETVAL=1; echo "failed"; return 1; fi
+   echo "started PID=\$pid"
+   RETVAL=0
+   return 0; }
 
+function stopService {
+   getServicePID
+   if [ \$? -ne 0 ]; then echo -n "\$serviceName is not running"; RETVAL=0; echo ""; return 0; fi
+   echo -n "Stopping \$serviceName   "
+   stopServiceProcess
+   if [ \$? -ne 0 ]; then RETVAL=1; echo "failed"; return 1; fi
+   echo "stopped PID=\$pid"
+   RETVAL=0
+   return 0; }
 
-start() {
-    DAEMON_EXEC="\${MY_CMD} >> \$OUTPUT_LOG"
+function checkServiceStatus {
+   echo -n "Checking for \$serviceName:   "
+   if getServicePID; then
+    echo "running PID=\$pid"
+    RETVAL=0
+   else
+    echo "stopped"
+    RETVAL=3
+   fi
+   return 0; }
 
-    echo -n \$"Starting ${appName} "
-    # Start me up!
-    daemon --user="\$MY_USER" --pidfile="\$PID_FILE" "\$DAEMON_EXEC 2>&1" &
-    RETVAL=\$?
-        if [ \$RETVAL = 0 ]; then
-            success
-            sleep 1s
-            echo > "\$PID_FILE"  # just in case we fail to find it
-            MY_SESSION_ID=`/bin/ps h -o sess -p \$\$`
-            # get PID
-            /bin/ps hww -u "\$MY_USER" -o sess,ppid,pid,cmd | \
-            while read sess ppid pid cmd; do
-                [ "\$ppid" = 1 ] || continue
-                echo "\$cmd" | grep "\$DAEMON_EXEC"
-                [ \$? = 0 ] || continue
-                # found a PID
-                echo \$pid > "\$PID_FILE"
-            done
-        else
-            failure
-        fi
-
-    echo
-    [ \$RETVAL -eq 0 ] && touch /var/lock/subsys/${appName}
-    return \$RETVAL
+function main {
+   RETVAL=0
+   case "\$1" in
+      start)                                               # starts the Java program as a Linux service
+         startService
+         ;;
+      stop)                                                # stops the Java program service
+         stopService
+         ;;
+      restart)                                             # stops and restarts the service
+         stopService && startService
+         ;;
+      status)                                              # displays the service status
+         checkServiceStatus
+         ;;
+      *)
+         echo "Usage: \$0 {start|stop|restart|status}"
+         exit 1
+         ;;
+      esac
+   exit \$RETVAL
 }
 
-stop() {
-    echo -n \$"Stopping ${appName} "
-    killproc -p \$PID_FILE
-    RETVAL=\$?
-    echo
-    [ \$RETVAL -eq 0 ] && rm -f /var/lock/subsys/${appName}
-    return \$RETVAL
-}
-
-restart() {
-      stop
-    start
-}
-
-reload() {
-    stop
-    start
-}
-
-case "\$1" in
-  start)
-      start
-    ;;
-  stop)
-      stop
-    ;;
-  status)
-    status ${appName}
-    ;;
-  restart)
-      restart
-    ;;
-  condrestart)
-      [ -f /var/lock/subsys/${appName} ] && restart || :
-    ;;
-  reload)
-    reload
-    ;;
-  *)
-    echo \$"Usage: \$0 {start|stop|status|restart|condrestart}"
-    exit 1
-esac
-
-exit \$?
-""".trim()
-
+main \$1
+"""
 }
 
 createPostInstallScript = { String prefix, String appName ->
@@ -286,7 +302,7 @@ useradd -m -d ${prefix} -s /sbin/nologin ${appName}
 chown -R ${appName}:${appName} ${prefix}
 chmod 544 ${prefix}/bin/*
 mkdir -p /var/log/${appName}
-touch /var/log/${appName}/output.log /var/log/${appName}/stacktrace.log
+touch /var/log/${appName}/${appName}.log /var/log/${appName}/stacktrace.log
 chown -R ${appName}:${appName} /var/log/${appName}
 chmod u+w -R /var/log/${appName}
 ln -sf ${prefix}/bin/${appName}-control /etc/init.d/${appName}
@@ -300,7 +316,7 @@ createPreUninstallScript = { prefix, appName ->
 /etc/init.d/${appName} stop
 chkconfig --del ${appName}
 unlink /etc/init.d/${appName}
-userdel ${appName}
+rm /var/run/campaign-galleries.pid
 """.trim()
 }
 
